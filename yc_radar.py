@@ -228,14 +228,29 @@ def send_webhook(url, payload, max_retries=3):
             time.sleep(wait)
 
 
-def build_payload(new_hits):
-    """Build the webhook JSON payload from a list of Algolia hits."""
-    return {
-        "event": "new_yc_companies",
-        "detected_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(new_hits),
-        "companies": [extract_company(h) for h in new_hits],
-    }
+def build_payload(hit):
+    """Build a single webhook JSON payload from one Algolia hit."""
+    company = extract_company(hit)
+    company["event"] = "new_yc_company"
+    company["detected_at"] = datetime.now(timezone.utc).isoformat()
+    return company
+
+
+def send_all_webhooks(url, new_hits, data_dir):
+    """Send one webhook per company. Returns (sent_count, failed_hits)."""
+    sent = 0
+    failed = []
+    for h in new_hits:
+        payload = build_payload(h)
+        name = h.get("name", "Unknown")
+        if send_webhook(url, payload):
+            sent += 1
+            log.info("Sent webhook for %s", name)
+        else:
+            failed.append(h)
+            log.error("Failed to send webhook for %s", name)
+        time.sleep(0.2)  # polite rate limiting
+    return sent, failed
 
 
 # ---------------------------------------------------------------------------
@@ -370,15 +385,18 @@ def main():
 
     log.info("YC Radar starting — data_dir=%s, dry_run=%s", data_dir, args.dry_run)
 
-    # Retry any pending webhook from a previous failed run
+    # Retry any pending webhooks from a previous failed run
     if webhook_url and not args.dry_run:
         pending = load_pending(data_dir)
         if pending:
-            log.info("Retrying pending webhook (%d companies)...", pending.get("count", 0))
-            if send_webhook(webhook_url, pending):
-                clear_pending(data_dir)
+            log.info("Retrying pending webhooks (%d companies)...", len(pending))
+            sent, failed = send_all_webhooks(webhook_url, pending, data_dir)
+            if failed:
+                save_pending(data_dir, failed)
+                log.warning("Retried pending: %d sent, %d still failing", sent, len(failed))
             else:
-                log.warning("Pending webhook retry failed — will try again next run")
+                clear_pending(data_dir)
+                log.info("All pending webhooks delivered")
 
     # Force re-seed
     if args.seed:
@@ -411,8 +429,8 @@ def main():
 
     if args.dry_run:
         print("\n[DRY RUN] Webhook not sent.")
-        payload = build_payload(new_hits)
-        log.debug("Payload that would be sent:\n%s", json.dumps(payload, indent=2))
+        for h in new_hits:
+            log.debug("Payload: %s", json.dumps(build_payload(h), indent=2))
         return
 
     if not webhook_url:
@@ -420,15 +438,15 @@ def main():
         print("Set WEBHOOK_URL in .env or pass --webhook-url to send results.")
         return
 
-    # Deliver webhook
-    payload = build_payload(new_hits)
-    if send_webhook(webhook_url, payload):
-        clear_pending(data_dir)
-        print(f"Webhook delivered: {len(new_hits)} companies sent to {webhook_url}")
-    else:
-        save_pending(data_dir, payload)
-        print("Webhook delivery failed — payload saved for retry on next run.")
+    # Deliver webhooks (one per company)
+    sent, failed = send_all_webhooks(webhook_url, new_hits, data_dir)
+    if failed:
+        save_pending(data_dir, failed)
+        print(f"Webhook: {sent} sent, {len(failed)} failed (saved for retry).")
         sys.exit(1)
+    else:
+        clear_pending(data_dir)
+        print(f"Webhook delivered: {sent} companies sent to {webhook_url}")
 
 
 if __name__ == "__main__":
