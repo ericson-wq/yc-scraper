@@ -1,0 +1,6 @@
+.env
+logs/
+data/pending_webhook.json
+__pycache__/
+*.pyc
+.claude/
