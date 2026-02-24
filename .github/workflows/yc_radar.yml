@@ -5,6 +5,9 @@ on:
     - cron: "0 16 * * *" # 8am PST (UTC-8)
   workflow_dispatch: # manual trigger from GitHub UI
 
+permissions:
+  contents: write
+
 jobs:
   scan:
     runs-on: ubuntu-latest
